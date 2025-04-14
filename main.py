@@ -1,126 +1,241 @@
 import os
-import cv2
+import glob
 import numpy as np
-from typing import Generator, Tuple, Optional
-import matplotlib  # Use the new colormaps API from matplotlib 3.7+
+import matplotlib.pyplot as plt
+from scipy.stats import gaussian_kde
+import matplotlib.cm as cm
 
-def load_image_pairs(directory: str) -> Generator[Tuple[int, Optional['cv2.Mat'], Optional['cv2.Mat']], None, None]:
+def compute_weighted_area(image_array: np.ndarray) -> float:
     """
-    Loads image pairs from a directory where files are named in the format 'x_y.png',
-    where x is a number and y is either 'pred' or 'target'. For each unique x, both images are loaded.
-
+    Compute the weighted area for an image array. Each pixel contributes
+    according to its inverted normalized intensity:
+        weight = 1 - normalized_value
+    where normalized_value is the pixel value scaled between 0 and 1.
+    
     Args:
-        directory (str): Path to the directory containing the PNG images.
-
-    Yields:
-        tuple: A tuple (x, pred_image, target_image) where:
-            - x (int): The numeric identifier.
-            - pred_image (cv2.Mat or None): The prediction image.
-            - target_image (cv2.Mat or None): The target image.
-              If an image fails to load, its corresponding value is None.
-    """
-    image_dict = {}
-    for file_name in os.listdir(directory):
-        if file_name.lower().endswith('.png'):
-            try:
-                x_str, label_ext = file_name.split('_')
-                label = label_ext.split('.')[0]
-                x = int(x_str)
-            except (ValueError, IndexError):
-                print(f"Skipping file (invalid naming): {file_name}")
-                continue
-            
-            if x not in image_dict:
-                image_dict[x] = {}
-            image_dict[x][label] = file_name
-
-    for x in sorted(image_dict.keys()):
-        pred_filename = image_dict[x].get('pred')
-        target_filename = image_dict[x].get('target')
-        
-        pred_image = None
-        target_image = None
-        
-        if pred_filename:
-            pred_path = os.path.join(directory, pred_filename)
-            pred_image = cv2.imread(pred_path)
-            if pred_image is None:
-                print(f"Failed to load prediction image: {pred_path}")
-        
-        if target_filename:
-            target_path = os.path.join(directory, target_filename)
-            target_image = cv2.imread(target_path)
-            if target_image is None:
-                print(f"Failed to load target image: {target_path}")
-        
-        yield x, pred_image, target_image
-
-def reverse_jet_colormap(colored_img: np.ndarray) -> np.ndarray:
-    """
-    Recovers the original normalized mask from an image produced by the jet colormap.
-    This function assumes that the original mask (with values in [0,1]) was mapped
-    to RGB using matplotlib’s jet colormap, then scaled to 0–255 and converted to uint8.
-
-    Args:
-        colored_img (np.ndarray): The input jet-colored image in BGR format.
-
+        image_array (np.ndarray): The image data.
+    
     Returns:
-        np.ndarray: A single-channel float32 image with values in [0,1] representing the original mask.
+        float: The sum of the pixel weights.
     """
-    # Get the jet colormap using the new matplotlib API.
-    jet_cmap = matplotlib.colormaps['jet']
+    if np.issubdtype(image_array.dtype, np.uint8):
+        normalized = image_array.astype(np.float32) / 255.0
+    elif np.issubdtype(image_array.dtype, np.floating):
+        normalized = image_array
+    else:
+        normalized = image_array.astype(np.float32)
     
-    # Pre-compute a lookup table for 256 discretized mask values.
-    # Each row is the RGB color corresponding to a normalized mask value.
-    lut = np.empty((256, 3), dtype=np.uint8)
-    mask_values = np.linspace(0, 1, 256)
-    for i, mask_val in enumerate(mask_values):
-        # Get the RGB value (first 3 channels) for the mask value.
-        rgb_float = jet_cmap(mask_val)[:3]
-        # Scale to 0-255 and round to nearest integer.
-        lut[i] = (np.array(rgb_float) * 255).round().astype(np.uint8)
+    weights = 1.0 - normalized
+    return float(np.sum(weights))
+
+def compute_weighted_centroid(image_array: np.ndarray) -> tuple[float, float]:
+    """
+    Compute the weighted centroid (x, y) for an image array using the same
+    weight strategy as compute_weighted_area.
     
-    # Convert the input image from BGR (OpenCV default) to RGB.
-    rgb_img = cv2.cvtColor(colored_img, cv2.COLOR_BGR2RGB)
+    Each pixel contributes a weight of: weight = 1 - normalized_value.
+    If the total weight is 0 (e.g. an entirely saturated image), the function
+    returns (nan, nan).
     
-    # Reshape the image to a 2D array of pixels, shape (num_pixels, 3).
-    pixels = rgb_img.reshape(-1, 3)  # shape (N, 3)
+    Returns:
+        (x_centroid, y_centroid): The computed centroid coordinates.
+    """
+    if np.issubdtype(image_array.dtype, np.uint8):
+        normalized = image_array.astype(np.float32) / 255.0
+    elif np.issubdtype(image_array.dtype, np.floating):
+        normalized = image_array
+    else:
+        normalized = image_array.astype(np.float32)
     
-    # Compute the absolute differences between each pixel and every LUT entry.
-    # This yields an array of shape (N, 256, 3).
-    diffs = np.abs(pixels[:, None, :] - lut[None, :, :])
-    # Sum differences across the color channels to get a score per LUT entry.
-    diff_sums = diffs.sum(axis=2)  # shape (N, 256)
-    # For each pixel, find the index of the LUT entry with the smallest difference.
-    best_indices = diff_sums.argmin(axis=1)  # shape (N,)
+    weights = 1.0 - normalized
+    total_weight = np.sum(weights)
     
-    # Normalize the indices to [0, 1] (0 corresponds to 0 and 255 corresponds to 1).
-    recovered_mask_flat = best_indices.astype(np.float32) / 255.0
-    # Reshape back to the original image dimensions.
-    recovered_mask = recovered_mask_flat.reshape(rgb_img.shape[:2])
+    if total_weight == 0:
+        # Avoid division by zero: return nan coordinates if the image is completely saturated.
+        return float('nan'), float('nan')
     
-    return recovered_mask
+    height, width = image_array.shape[:2]
+    # Create coordinate grids: y corresponds to rows, x to columns.
+    y_indices, x_indices = np.indices((height, width))
+    
+    x_centroid = np.sum(x_indices * weights) / total_weight
+    y_centroid = np.sum(y_indices * weights) / total_weight
+    return x_centroid, y_centroid
+
+def process_directory(directory: str) -> None:
+    """
+    Process each prediction/target pair of .npy files in a specified sub-directory,
+    compute their weighted areas and centroids, generate scatter plots comparing 
+    predicted and target values, and save the plots into the script directory.
+
+    Args:
+        directory (str): The name of the sub-directory (e.g., "test", "train", or "val").
+    """
+    print(f"Processing directory: {directory}")
+    data_dir: str = os.path.join("4825newresults5", "tversky_focal_recons_float", directory)
+    
+    # Retrieve all prediction files
+    pred_files = glob.glob(os.path.join(data_dir, "*_pred.npy"))
+    pred_files.sort()  # Ensure consistent ordering
+    
+    if not pred_files:
+        print(f"No prediction files found in directory: {data_dir}")
+        return
+
+    # Prepare lists to store computed values.
+    predicted_areas = []
+    target_areas = []
+    pred_centroid_x = []
+    pred_centroid_y = []
+    target_centroid_x = []
+    target_centroid_y = []
+
+    # Process each prediction file.
+    for pred_file in pred_files:
+        base_name = os.path.basename(pred_file)
+        index = base_name.split("_")[0]
+        
+        # Construct the corresponding target filename.
+        target_filename = f"{index}_target.npy"
+        target_filepath = os.path.join(data_dir, target_filename)
+        
+        if not os.path.exists(target_filepath):
+            print(f"Warning: Target file '{target_filepath}' does not exist. Skipping index {index}.")
+            continue
+        
+        # Load prediction and target images.
+        pred_image = np.load(pred_file)
+        target_image = np.load(target_filepath)
+        
+        # Compute weighted areas.
+        pred_area = compute_weighted_area(pred_image)
+        target_area = compute_weighted_area(target_image)
+        
+        # Compute weighted centroids.
+        pred_cx, pred_cy = compute_weighted_centroid(pred_image)
+        target_cx, target_cy = compute_weighted_centroid(target_image)
+        
+        height, width = pred_image.shape[:2]
+        max_area = height * width
+        print(f"Index {index} in {directory}:")
+        print(f"  Predicted area      = {pred_area:.2f} (Max: {max_area})")
+        print(f"  Target area         = {target_area:.2f} (Max: {max_area})")
+        print(f"  Predicted centroid  = ({pred_cx:.2f}, {pred_cy:.2f})")
+        print(f"  Target centroid     = ({target_cx:.2f}, {target_cy:.2f})")
+        print()
+        
+        predicted_areas.append(pred_area)
+        target_areas.append(target_area)
+        pred_centroid_x.append(pred_cx)
+        pred_centroid_y.append(pred_cy)
+        target_centroid_x.append(target_cx)
+        target_centroid_y.append(target_cy)
+    
+    # Convert lists to NumPy arrays.
+    predicted_areas = np.array(predicted_areas)
+    target_areas = np.array(target_areas)
+    pred_centroid_x = np.array(pred_centroid_x)
+    pred_centroid_y = np.array(pred_centroid_y)
+    target_centroid_x = np.array(target_centroid_x)
+    target_centroid_y = np.array(target_centroid_y)
+    
+    # ---------------------------
+    # Plot 1: Weighted Area Comparison
+    # ---------------------------
+    if target_areas.size > 0 and predicted_areas.size > 0:
+        coeffs = np.polyfit(target_areas, predicted_areas, 1)
+        slope, intercept = coeffs
+        print(f"Weighted Area Best fit line in {directory}: predicted_area = {slope:.2f} * target_area + {intercept:.2f}")
+        
+        x_fit = np.linspace(target_areas.min(), target_areas.max(), 100)
+        y_fit = slope * x_fit + intercept
+        
+        # Compute density of the data points.
+        data_stack = np.vstack([target_areas, predicted_areas])
+        density = gaussian_kde(data_stack)(data_stack)
+        
+        plt.figure(figsize=(8, 6))
+        plt.scatter(target_areas, predicted_areas, c=density, s=4, cmap=cm.jet,
+                    rasterized=True, label="Data points")
+        plt.plot(x_fit, y_fit, color='black', linestyle='-', linewidth=2,
+                 label="Best fit line")
+        plt.xlabel("Target Weighted Area", fontsize=15)
+        plt.ylabel("Predicted Weighted Area", fontsize=15)
+        plt.title(f"Predicted vs. Target Weighted Areas ({directory.capitalize()})", fontsize=17)
+        plt.legend(fontsize=12)
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(f"parityplot_weighted_area_{directory}.pdf", dpi=250)
+        plt.show()
+    
+    # ---------------------------
+    # Plot 2: Centroid Comparison
+    # ---------------------------
+    fig, (ax_x, ax_y) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # Centroid X Comparison
+    valid_x = ~np.isnan(target_centroid_x) & ~np.isnan(pred_centroid_x)
+    if np.any(valid_x):
+        coeffs_x = np.polyfit(target_centroid_x[valid_x], pred_centroid_x[valid_x], 1)
+        slope_x, intercept_x = coeffs_x
+        print(f"Centroid X Best fit line in {directory}: predicted_x = {slope_x:.2f} * target_x + {intercept_x:.2f}")
+        
+        x_fit_x = np.linspace(target_centroid_x[valid_x].min(), target_centroid_x[valid_x].max(), 100)
+        y_fit_x = slope_x * x_fit_x + intercept_x
+        
+        data_stack_x = np.vstack([target_centroid_x[valid_x], pred_centroid_x[valid_x]])
+        density_x = gaussian_kde(data_stack_x)(data_stack_x)
+        
+        ax_x.scatter(target_centroid_x[valid_x], pred_centroid_x[valid_x],
+                     c=density_x, s=4, cmap=cm.jet, rasterized=True, label="Data points")
+        ax_x.plot(x_fit_x, y_fit_x, color='black', linestyle='-', linewidth=2,
+                  label="Best fit line")
+        ax_x.set_xlabel("Target X Centroid", fontsize=15)
+        ax_x.set_ylabel("Predicted X Centroid", fontsize=15)
+        ax_x.set_title(f"Centroid X Comparison ({directory.capitalize()})", fontsize=17)
+        ax_x.legend(fontsize=12)
+        ax_x.grid(True)
+    else:
+        ax_x.text(0.5, 0.5, "No valid data for Centroid X", ha="center", va="center")
+        ax_x.axis('off')
+    
+    # Centroid Y Comparison
+    valid_y = ~np.isnan(target_centroid_y) & ~np.isnan(pred_centroid_y)
+    if np.any(valid_y):
+        coeffs_y = np.polyfit(target_centroid_y[valid_y], pred_centroid_y[valid_y], 1)
+        slope_y, intercept_y = coeffs_y
+        print(f"Centroid Y Best fit line in {directory}: predicted_y = {slope_y:.2f} * target_y + {intercept_y:.2f}")
+        
+        x_fit_y = np.linspace(target_centroid_y[valid_y].min(), target_centroid_y[valid_y].max(), 100)
+        y_fit_y = slope_y * x_fit_y + intercept_y
+        
+        data_stack_y = np.vstack([target_centroid_y[valid_y], pred_centroid_y[valid_y]])
+        density_y = gaussian_kde(data_stack_y)(data_stack_y)
+        
+        ax_y.scatter(target_centroid_y[valid_y], pred_centroid_y[valid_y],
+                     c=density_y, s=4, cmap=cm.jet, rasterized=True, label="Data points")
+        ax_y.plot(x_fit_y, y_fit_y, color='black', linestyle='-', linewidth=2,
+                  label="Best fit line")
+        ax_y.set_xlabel("Target Y Centroid", fontsize=15)
+        ax_y.set_ylabel("Predicted Y Centroid", fontsize=15)
+        ax_y.set_title(f"Centroid Y Comparison ({directory.capitalize()})", fontsize=17)
+        ax_y.legend(fontsize=12)
+        ax_y.grid(True)
+    else:
+        ax_y.text(0.5, 0.5, "No valid data for Centroid Y", ha="center", va="center")
+        ax_y.axis('off')
+    
+    fig.tight_layout()
+    plt.savefig(f"parityplot_centroid_{directory}.pdf", dpi=250)
+    plt.show()
 
 def main() -> None:
-    src_directory = 'results2/train'      # Source directory with jet-colored images.
-    dest_directory = 'results2/trainPOST'   # Destination directory for the recovered mask images.
-    
-    if not os.path.exists(dest_directory):
-        os.makedirs(dest_directory)
-    
-    for x, pred_img, target_img in load_image_pairs(src_directory):
-        print(f"Processing pair for x = {x}")
-        
-        if pred_img is not None:
-            mask_pred = reverse_jet_colormap(pred_img)
-            # Save the recovered mask. Here we scale to 16-bit for better precision.
-            pred_save_path = os.path.join(dest_directory, f"{x}_pred_mask.png")
-            cv2.imwrite(pred_save_path, (mask_pred * 65535).astype(np.uint16))
-        
-        if target_img is not None:
-            mask_target = reverse_jet_colormap(target_img)
-            target_save_path = os.path.join(dest_directory, f"{x}_target_mask.png")
-            cv2.imwrite(target_save_path, (mask_target * 65535).astype(np.uint16))
+    """
+    Loop over the specified directories ("test", "train", and "val") and process each one.
+    """
+    directories = ["test", "train", "val"]
+    for d in directories:
+        process_directory(d)
 
 if __name__ == "__main__":
     main()
