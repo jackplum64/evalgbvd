@@ -117,14 +117,20 @@ def cosine_similarity(
 
 def main():
     script_dir = Path(__file__).parent
+    # MODIFY BELOW
     base_dir = Path(
         './results_focal_tversky_gbblur7'
         '/tversky_focal_float_blur_5_1_001_5_0.0_1.0'
     )
+    # MODIFY ABOVE
+
     out_dir = script_dir / 'output'
     out_dir.mkdir(exist_ok=True, parents=True)
 
+    # MODIFY BELOW
     data_dir  = base_dir / 'train'
+    # MODIFY ABOVE
+
     data = read_data(data_dir)
     print(f'Loaded {len(data)} .npy files from {data_dir!s}')
 
