@@ -1,9 +1,15 @@
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import List, Dict, Tuple
 import numpy as np
 from numpy.typing import NDArray
 import cv2
+import csv
 from skimage.metrics import structural_similarity
+import matplotlib.pyplot as plt
+from matplotlib import cm
+from scipy.stats import gaussian_kde
+import math
+
 
 # ─── DATA I/O ──────────────────────────────────────────────────────────────────
 
@@ -148,6 +154,78 @@ def insert_vertical_line(
     return np.insert(image, mid, line, axis=1)
 
 
+# ─── PLOT OPS ─────────────────────────────────────────────────────────────────
+
+def load_metrics(csv_path: Path) -> Dict[str, List[float]]:
+    """
+    Reads 'metrics_summary.csv' and returns a dict
+    mapping metric name → list of values.
+    """
+    with open(csv_path, newline='') as f:
+        reader = csv.DictReader(f)
+        metrics: Dict[str, List[float]] = {name: [] for name in reader.fieldnames if name!='idx'}
+        for row in reader:
+            for k in metrics:
+                metrics[k].append(float(row[k]))
+    return metrics
+
+def plot_metrics_density(metrics: Dict[str, List[float]]) -> None:
+    """
+    For each metric, plot its samples along a vertical line (x=0),
+    coloring each dot by its local 1D kde-based density.
+    
+    metrics: dict mapping metric name → list of float values (unitless)
+    """
+    names = list(metrics.keys())
+    n_metrics = len(names)
+
+    # 5 cols, enough rows to fit all metrics
+    n_cols = 5
+    n_rows = math.ceil(n_metrics / n_cols)
+
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(n_cols * 3, n_rows * 4),
+        squeeze=False,
+        sharey=False
+    )
+    axes_flat = axes.flatten()
+
+    for idx, name in enumerate(names):
+        ax = axes_flat[idx]
+        vals = np.array(metrics[name], dtype=float)
+
+        # estimate density at each sample
+        kde = gaussian_kde(vals)
+        dens = kde(vals)
+
+        # scatter at x=0, y=vals, color by density
+        sc = ax.scatter(
+            np.zeros_like(vals), vals,
+            c=dens,
+            s=12,
+            cmap=cm.jet,
+            rasterized=True,
+            zorder=10
+        )
+
+        # central vertical line
+        ax.axvline(0.0, color='black', linewidth=1, zorder=5)
+
+        ax.set_title(name, pad=6)
+        ax.set_xticks([])              # no x‐ticks
+        ax.set_xlim(-0.5, 0.5)         # small horizontal span
+        ax.set_ylabel('Value')         # unitless
+        ax.grid(axis='y', linestyle=':', linewidth=0.5, zorder=0)
+
+    # hide any extra axes
+    for ax in axes_flat[n_metrics:]:
+        ax.set_visible(False)
+
+    fig.tight_layout()
+    plt.show()
+
+
 # ─── MAIN ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -217,6 +295,12 @@ def main() -> None:
             img8 = (np.clip(insert_vertical_line((img*255).astype(np.uint8)),0,255))
             fname = f"{md[i]:.4f}_{i}.png"
             cv2.imwrite(str(d/fname), img8)
+
+
+    # Generate and save boxplots
+    csv_file = Path('output/metrics_summary.csv')
+    m = load_metrics(csv_file)
+    plot_metrics_density(m)
 
 
 if __name__ == '__main__':
