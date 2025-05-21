@@ -169,17 +169,19 @@ def load_metrics(csv_path: Path) -> Dict[str, List[float]]:
                 metrics[k].append(float(row[k]))
     return metrics
 
-def plot_metrics_density(metrics: Dict[str, List[float]]) -> None:
+def plot_metrics_density(
+    metrics: Dict[str, List[float]],
+    save_path: Path
+) -> None:
     """
     For each metric, plot its samples along a vertical line (x=0),
-    coloring each dot by its local 1D kde-based density.
-    
-    metrics: dict mapping metric name → list of float values (unitless)
+    coloring each dot by its local 1D kde-based density,
+    then save the whole figure to save_path (PNG).
     """
     names = list(metrics.keys())
     n_metrics = len(names)
 
-    # 5 cols, enough rows to fit all metrics
+    # grid: 5 columns, enough rows
     n_cols = 5
     n_rows = math.ceil(n_metrics / n_cols)
 
@@ -195,12 +197,12 @@ def plot_metrics_density(metrics: Dict[str, List[float]]) -> None:
         ax = axes_flat[idx]
         vals = np.array(metrics[name], dtype=float)
 
-        # estimate density at each sample
+        # 1D density estimate
         kde = gaussian_kde(vals)
         dens = kde(vals)
 
-        # scatter at x=0, y=vals, color by density
-        sc = ax.scatter(
+        # plot points at x=0
+        ax.scatter(
             np.zeros_like(vals), vals,
             c=dens,
             s=12,
@@ -208,22 +210,22 @@ def plot_metrics_density(metrics: Dict[str, List[float]]) -> None:
             rasterized=True,
             zorder=10
         )
-
-        # central vertical line
+        # central line
         ax.axvline(0.0, color='black', linewidth=1, zorder=5)
 
         ax.set_title(name, pad=6)
-        ax.set_xticks([])              # no x‐ticks
-        ax.set_xlim(-0.5, 0.5)         # small horizontal span
-        ax.set_ylabel('Value')         # unitless
+        ax.set_xticks([])
+        ax.set_xlim(-0.5, 0.5)
+        ax.set_ylabel('Value')
         ax.grid(axis='y', linestyle=':', linewidth=0.5, zorder=0)
 
-    # hide any extra axes
+    # hide unused axes
     for ax in axes_flat[n_metrics:]:
         ax.set_visible(False)
 
     fig.tight_layout()
-    plt.show()
+    fig.savefig(save_path, dpi=250)
+    plt.close(fig)
 
 
 # ─── MAIN ──────────────────────────────────────────────────────────────────────
@@ -299,8 +301,11 @@ def main() -> None:
 
     # Generate and save boxplots
     csv_file = Path('output/metrics_summary.csv')
-    m = load_metrics(csv_file)
-    plot_metrics_density(m)
+    metrics = load_metrics(csv_file)
+
+    overview_path = out_dir / 'overview.png'
+    plot_metrics_density(metrics, overview_path)
+    print(f"Saved overview density plot to {overview_path}")
 
 
 if __name__ == '__main__':
