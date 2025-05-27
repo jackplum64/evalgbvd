@@ -153,6 +153,77 @@ def insert_vertical_line(
     if c==4: line[...,3]=255
     return np.insert(image, mid, line, axis=1)
 
+def contrast_enhance(
+    image: NDArray[np.uint8],
+    alpha: float,
+    beta: float
+) -> NDArray[np.uint8]:
+    """
+    Increase the contrast of an image using alpha (contrast) and beta (brightness).
+    - alpha: 1.0 means no change, >1.0 means higher contrast
+    - beta:  positive values to brighten, negative values to darken
+    """
+    # cv2.convertScaleAbs performs the following operation:
+    # output = alpha * image + beta
+    # (then clamps values to the 8-bit range [0, 255])
+    contrasted = cv2.convertScaleAbs(image, alpha=alpha, beta=beta)
+
+    return contrasted
+
+def enhance_in_place(
+    images: Dict[int, Tuple[NDArray[np.float32], NDArray[np.float32]]],
+    alpha: float,
+    beta: float
+) -> None:
+    """
+    Apply contrast_enhance to each image in the dict in-place.
+    """
+    for key, (img1, img2) in list(images.items()):
+        images[key] = (
+            contrast_enhance(img1, alpha, beta),
+            contrast_enhance(img2, alpha, beta)
+        )
+
+def normalize_image(
+    image: NDArray[np.float32]
+) -> NDArray[np.uint8]:
+    """
+    Normalize pixel intensities so the minimum maps to 0 and the maximum to 255.
+
+    Parameters:
+        image: Input image array with arbitrary intensity range (unit: intensity).
+
+    Returns:
+        8-bit image array normalized to [0, 255] (unit: intensity).
+    """
+    min_val = float(np.min(image))       # intensity
+    max_val = float(np.max(image))       # intensity
+    range_val = max_val - min_val        # intensity
+
+    if range_val == 0.0:
+        # Avoid division by zero: return a black image
+        return np.zeros_like(image, dtype=np.uint8)
+
+    # Vectorized scaling to [0, 255]
+    scaled = (image - min_val) * (255.0 / range_val)
+    inverted: NDArray[np.uint8] = (255.0 - scaled).astype(np.uint8)
+
+    return inverted
+
+def normalize_in_place(
+    images: Dict[int, Tuple[NDArray[np.float32], NDArray[np.float32]]]
+) -> None:
+    """
+    Apply normalize_image to each pair of images in the dict in-place.
+
+    Parameters:
+        images: Dict mapping an integer ID to a (target, pred) tuple of image arrays (unit: intensity).
+    """
+    for key, (img1, img2) in list(images.items()):
+        images[key] = (
+            normalize_image(img1),
+            normalize_image(img2)
+        )
 
 # ─── PLOT OPS ─────────────────────────────────────────────────────────────────
 
@@ -228,6 +299,76 @@ def plot_metrics_density(
     plt.close(fig)
 
 
+def plot_metrics_histograms(
+    metrics: Dict[str, List[float]],
+    save_path: Path
+) -> None:
+    """
+    For each metric in `metrics`, plot its sample values as a histogram
+    and save the combined figure to `save_path`.
+    """
+    names: List[str] = list(metrics.keys())
+    n_metrics: int = len(names)
+
+    # 5 columns, as before
+    n_cols: int = 5
+    n_rows: int = math.ceil(n_metrics / n_cols)
+
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(n_cols * 3, n_rows * 4),
+        squeeze=False,
+        sharey=False
+    )
+    axes_flat = axes.flatten()
+
+    for idx, name in enumerate(names):
+        ax = axes_flat[idx]
+        vals = np.array(metrics[name], dtype=float)  # unitless samples
+
+        # — drop NaNs / ±Inf —
+        mask = np.isfinite(vals)
+        if not mask.all():
+            # optional: report how many
+            print(f"[{name}] dropping {len(vals) - mask.sum()} non‐finite samples")
+            vals = vals[mask]
+
+        # — pick a safe bin count —
+        n = vals.size
+        bins = min(50, int(math.sqrt(n))) if n else 10
+
+        # — wrap in try/except so we catch any surprise crashes —
+        try:
+            ax.hist(
+                vals,
+                bins=bins,
+                edgecolor='black',
+                linewidth=0.5,
+                zorder=2
+            )
+        except Exception as e:
+            print(f"Skipping histogram for {name} at index {idx}: {e}")
+            ax.text(
+                0.5, 0.5,
+                "error",
+                ha="center", va="center",
+                transform=ax.transAxes,
+                color="red"
+            )
+
+        ax.set_title(name, pad=6)
+        ax.set_xlabel('Value')
+        ax.set_ylabel('Count')
+        ax.grid(axis='y', linestyle=':', linewidth=0.5, zorder=1)
+
+    # hide any unused axes
+    for ax in axes_flat[n_metrics:]:
+        ax.set_visible(False)
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=250)
+    plt.close(fig)
+
 # ─── MAIN ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -237,13 +378,27 @@ def main() -> None:
         '/tversky_focal_float_blur_5_1_001_5_0.0_1.0'
     )
     data_dir   = base_dir / 'train'
+
+
+    ### Preprocess ###
+    CONTRAST_ENHANCE = 1.0 # 1.0 means no change
+    BRIGHTEN         = 0   # 0 means no change
+    NORMALIZE        = False # normalize image to [0, 255]
+
+
+    ### DO NOT EDIT BELOW THIS LINE ###
+
     out_dir    = script_dir / 'output'
     out_dir.mkdir(exist_ok=True, parents=True)
 
     raw = read_data(data_dir)
     print(f'Loaded {len(raw)} files')
+
     td  = organize_data(raw)
     print(f'Found {len(td)} (target,pred) pairs')
+
+    #enhance_in_place(td, CONTRAST_ENHANCE, BRIGHTEN)
+    if NORMALIZE: normalize_in_place(td)
 
     # compute everything
     rho_dict = sum_pixelwise_product(td)
@@ -307,6 +462,15 @@ def main() -> None:
     plot_metrics_density(metrics, overview_path)
     print(f"Saved overview density plot to {overview_path}")
 
+    # Generate and save histograms
+    histograms_path = out_dir / 'histogram.png'
+
+    plot_metrics_histograms(metrics, histograms_path)
+    print(f'Saved histograms to {histograms_path}')
+
+
+
 
 if __name__ == '__main__':
     main()
+
