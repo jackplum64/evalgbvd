@@ -7,7 +7,8 @@ import csv
 from skimage.metrics import structural_similarity
 import matplotlib.pyplot as plt
 from matplotlib import cm
-from scipy.stats import gaussian_kde
+from scipy.stats import gaussian_kde, skew, kurtosis
+from scipy.signal import find_peaks
 import math
 
 
@@ -80,12 +81,19 @@ def r_squared(
 
 
 def pearson_correlation(
-    a: NDArray[np.float32], b: NDArray[np.float32]
-) -> float:
-    af = a.ravel(); bf = b.ravel()
-    a0 = af - af.mean(); b0 = bf - bf.mean()
-    denom = np.linalg.norm(a0)*np.linalg.norm(b0)
-    return float((a0@b0)/denom) if denom else 0.0
+    a: NDArray[np.float32],
+    b: NDArray[np.float32]
+                        ) -> float:
+    
+    af = a.ravel() # Flatten
+    bf = b.ravel()
+
+    a0 = af - af.mean() # Center mean to zero
+    b0 = bf - bf.mean()
+
+    denom = np.linalg.norm(a0)*np.linalg.norm(b0) # Compute normalization factor
+
+    return float((np.dot(a0, b0))/denom) if denom else 0.0
 
 
 def soft_dice(
@@ -224,6 +232,48 @@ def normalize_in_place(
             normalize_image(img1),
             normalize_image(img2)
         )
+
+def strengthen_colormap(
+        image: NDArray[np.float32],
+        strength: float
+) -> NDArray[np.float32]:
+    """
+    Apply a nonlinear transformation function to each pair of images in place
+
+    Parameters:
+        image: Input image array with arbitrary intensity range (unit: intensity).
+
+    Returns:
+        8-bit image array normalized to [0, 255] (unit: intensity).
+    """
+
+    strengthened = np.power(image, strength)
+
+
+    return strengthened
+
+
+def strengthen_colormap_in_place(
+    images: Dict[int, Tuple[NDArray[np.float32], NDArray[np.float32]]],
+    mode: str,
+    strength: float
+) -> None:
+    """
+    Apply strengthen_colormap to ground truth, prediction, or both images in pair.
+
+    Parameters:
+        images: Dict mapping an integer ID to a (target, pred) tuple of image arrays (unit: intensity).
+        mode: Str 'gt', 'pred', or 'both' for ground truth, prediction, or both images
+        strength: colormap strength factor (unitless).
+    """
+    for key, (gt_img, pred_img) in images.items():
+        # decide whether to process each image or leave it unchanged
+        new_gt   = strengthen_colormap(gt_img, strength)   if mode in ('gt',   'both') else gt_img
+        new_pred = strengthen_colormap(pred_img, strength) if mode in ('pred', 'both') else pred_img
+
+        images[key] = (new_gt, new_pred)
+
+
 
 # ─── PLOT OPS ─────────────────────────────────────────────────────────────────
 
@@ -369,13 +419,72 @@ def plot_metrics_histograms(
     fig.savefig(save_path, dpi=250)
     plt.close(fig)
 
+
+# ─── STATS OPS ─────────────────────────────────────────────────────────────────
+
+def print_pearson_bimodal_analysis(scores: List[float]) -> None:
+    """
+    Print a bimodal statistical analysis of Pearson correlation scores.
+
+    Parameters:
+        scores: List of Pearson correlation coefficients (unitless).
+    """
+    arr: np.ndarray = np.array(scores, dtype=float)    # unitless scores
+    n: int = arr.size                                 # number of samples
+
+    # Global summary statistics
+    mean: float = float(np.mean(arr))                  # unitless
+    std: float  = float(np.std(arr, ddof=0))           # unitless
+    med: float  = float(np.median(arr))                # unitless
+    sk: float   = float(skew(arr))                     # unitless
+    kurt: float = float(kurtosis(arr))                 # unitless
+
+    # Build histogram
+    bins = min(50, int(math.sqrt(n))) if n else 10
+    counts, bin_edges = np.histogram(arr, bins=bins)    # counts per bin
+    centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0   # bin centers
+
+    # Find local maxima in the bin counts
+    peak_idxs, _ = find_peaks(counts)
+    if peak_idxs.size < 2:
+        # fallback if <2 local peaks: take two largest bins
+        peak_idxs = np.argsort(counts)[-2:]
+    # pick the top two peaks by height
+    top2 = peak_idxs[np.argsort(counts[peak_idxs])[::-1][:2]]
+
+    mode_locs = [centers[i] for i in top2]            # unitless
+    mode_mags = [int(counts[i]) for i in top2]        # bin counts
+
+    ratio: float = mode_mags[0] / mode_mags[1] if mode_mags[1] else float('inf')
+
+    # Print summary
+    print("=== Bimodal Analysis of Pearson Correlation Scores ===")
+    print(f"Samples: {n}")
+    print(f"Mean: {mean:.4f}, Median: {med:.4f}, Std Dev: {std:.4f}")
+    print(f"Skewness: {sk:.4f}, Kurtosis: {kurt:.4f}\n")
+
+    print("Identified Modes:")
+    for idx, (loc, mag) in enumerate(zip(mode_locs, mode_mags), start=1):
+        print(f" Mode {idx}: location = {loc:.4f}, count = {mag}")
+    print(f"Mode ratio (Mode 1 / Mode 2): {ratio:.4f}\n")
+
+    # % within ±0.5σ, ±1σ, ±1.5σ of each mode
+    for idx, loc in enumerate(mode_locs, start=1):
+        print(f"Mode {idx} intervals around {loc:.4f}:")
+        for k in (0.5, 1.0, 1.5):
+            low, high = loc - k*std, loc + k*std
+            pct = float(np.mean((arr >= low) & (arr <= high))) * 100.0
+            print(f"  ±{k}σ: {pct:.2f}% (from {low:.4f} to {high:.4f})")
+        print()
+
+
 # ─── MAIN ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     script_dir = Path(__file__).parent
     base_dir   = Path(
-        './results_focal_tversky_gbblur7'
-        '/tversky_focal_float_blur_5_1_001_5_0.0_1.0'
+        './resultsnew'
+        '/tversky_focal_float_blur_5_1_001_5_0.0_1.0_0.75'
     )
     data_dir   = base_dir / 'train'
 
@@ -384,6 +493,8 @@ def main() -> None:
     CONTRAST_ENHANCE = 1.0 # 1.0 means no change
     BRIGHTEN         = 0   # 0 means no change
     NORMALIZE        = False # normalize image to [0, 255]
+    STRENGTH_PRED    = 1.35 # apply strengthening function to predictions. 1.0 means no change
+    STRENGTH_GT      = 1.0 # apply strengthening function to ground truth. 1.0 means no change
 
 
     ### DO NOT EDIT BELOW THIS LINE ###
@@ -398,6 +509,11 @@ def main() -> None:
     print(f'Found {len(td)} (target,pred) pairs')
 
     #enhance_in_place(td, CONTRAST_ENHANCE, BRIGHTEN)
+    if STRENGTH_PRED != 1.0:
+        strengthen_colormap_in_place(td, 'pred', STRENGTH_PRED)
+    if STRENGTH_GT != 1.0:
+        strengthen_colormap_in_place(td, 'gt', STRENGTH_GT)
+
     if NORMALIZE: normalize_in_place(td)
 
     # compute everything
@@ -467,6 +583,13 @@ def main() -> None:
 
     plot_metrics_histograms(metrics, histograms_path)
     print(f'Saved histograms to {histograms_path}')
+
+    pc_dict = {i: pearson_correlation(t,p) for i,(t,p) in td.items()}
+
+    # ── Bimodal analysis of Pearson scores ──
+    print_pearson_bimodal_analysis(
+        [pc for _, pc in sorted(pc_dict.items())]  # unitless scores
+    )
 
 
 
