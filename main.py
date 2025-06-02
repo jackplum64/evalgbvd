@@ -377,113 +377,126 @@ def print_pearson_bimodal_analysis(scores: List[float]) -> None:
 
 def main() -> None:
     script_dir = Path(__file__).parent
-    base_dir = Path(
-        './resultsnew'
-        '/tversky_focal_float_blur_5_1_001_5_0.0_1.0_0.75'
-    )
-    data_dir = base_dir / 'train'
 
-    ### Preprocess ###
-    CONTRAST_ENHANCE = 1.0
-    BRIGHTEN = 0
-    NORMALIZE = False
-    STRENGTH_PRED = 1.4
-    STRENGTH_GT = 1.0
+    # Parent directory containing all child results folders
+    parent_dir = Path('../../thoopul/ml_notebook_rewrite/ML/results_focal_tversky_gbblur7_final/')
+    # Prefix common to all child directories we want to process
+    child_prefix = 'tversky_focal_float_blur_'
 
-    ### DO NOT TOUCH BELOW ###
+    for child in sorted(parent_dir.iterdir()):
+        if not child.is_dir() or not child.name.startswith(child_prefix):
+            continue
 
-    out_dir = script_dir / 'output'
-    out_dir.mkdir(exist_ok=True, parents=True)
+        base_dir = child
+        data_dir = base_dir / 'train'
 
-    raw = read_data(data_dir)
-    print(f'Loaded {len(raw)} files')
+        ### Preprocess parameters ###
+        CONTRAST_ENHANCE = 1.0
+        BRIGHTEN = 0
+        NORMALIZE = False
+        STRENGTH_PRED = 1.4
+        STRENGTH_GT = 1.0
 
-    td = organize_data(raw)
-    print(f'Found {len(td)} (target,pred) pairs')
+        # Create a separate output folder for this child directory
+        out_dir = script_dir / 'output' / child.name
+        out_dir.mkdir(exist_ok=True, parents=True)
 
-    if STRENGTH_PRED != 1.0:
-        strengthen_colormap_in_place(td, 'pred', STRENGTH_PRED)
-    if STRENGTH_GT != 1.0:
-        strengthen_colormap_in_place(td, 'gt', STRENGTH_GT)
+        # ─── Load and organize ──────────────────────────────────────────────────
+        raw = read_data(data_dir)
+        print(f'[{child.name}] Loaded {len(raw)} files')
 
-    if NORMALIZE:
-        normalize_in_place(td)
+        td = organize_data(raw)
+        print(f'[{child.name}] Found {len(td)} (target,pred) pairs')
 
-    # compute everything
-    rho_dict = sum_pixelwise_product(td)
-    cos_dict = {i: cosine_similarity(t, p) for i, (t, p) in td.items()}
+        # Apply optional colormap strengthening
+        if STRENGTH_PRED != 1.0:
+            strengthen_colormap_in_place(td, 'pred', STRENGTH_PRED)
+        if STRENGTH_GT != 1.0:
+            strengthen_colormap_in_place(td, 'gt', STRENGTH_GT)
 
-    mse_dict = {i: mean_squared_error(t, p) for i, (t, p) in td.items()}
-    rmse_dict = {i: root_mean_squared_error(t, p) for i, (t, p) in td.items()}
-    mcc_dict = {i: matthews_correlation(t, p) for i, (t, p) in td.items()}
-    r2_dict = {i: r_squared(t, p) for i, (t, p) in td.items()}
-    pc_dict = {i: pearson_correlation(t, p) for i, (t, p) in td.items()}
-    sd_dict = {i: soft_dice(t, p) for i, (t, p) in td.items()}
-    si_dict = {i: soft_iou(t, p) for i, (t, p) in td.items()}
-    ss_dict = {i: ssim_index(t, p) for i, (t, p) in td.items()}
+        # Optional normalization
+        if NORMALIZE:
+            normalize_in_place(td)
 
-    # save summary CSV
-    with open(out_dir / 'metrics_summary.csv', 'w', newline='') as f:
-        w = csv.writer(f)
-        header = [
-            'idx', 'rho', 'cosine', 'mse', 'rmse', 'mcc',
-            'r2', 'pearson', 'soft_dice', 'soft_iou', 'ssim'
+        # ─── Compute metrics ────────────────────────────────────────────────────
+        rho_dict = sum_pixelwise_product(td)
+        cos_dict = {i: cosine_similarity(t, p) for i, (t, p) in td.items()}
+
+        mse_dict = {i: mean_squared_error(t, p) for i, (t, p) in td.items()}
+        rmse_dict = {i: root_mean_squared_error(t, p) for i, (t, p) in td.items()}
+        mcc_dict = {i: matthews_correlation(t, p) for i, (t, p) in td.items()}
+        r2_dict = {i: r_squared(t, p) for i, (t, p) in td.items()}
+        pc_dict = {i: pearson_correlation(t, p) for i, (t, p) in td.items()}
+        sd_dict = {i: soft_dice(t, p) for i, (t, p) in td.items()}
+        si_dict = {i: soft_iou(t, p) for i, (t, p) in td.items()}
+        ss_dict = {i: ssim_index(t, p) for i, (t, p) in td.items()}
+
+        # ─── Save summary CSV ───────────────────────────────────────────────────
+        summary_csv = out_dir / 'metrics_summary.csv'
+        with open(summary_csv, 'w', newline='') as f:
+            w = csv.writer(f)
+            header = [
+                'idx', 'rho', 'cosine', 'mse', 'rmse', 'mcc',
+                'r2', 'pearson', 'soft_dice', 'soft_iou', 'ssim'
+            ]
+            w.writerow(header)
+            for i in sorted(td):
+                w.writerow([
+                    i,
+                    f'{rho_dict[i]:.6f}',
+                    f'{cos_dict[i]:.6f}',
+                    f'{mse_dict[i]:.6f}',
+                    f'{rmse_dict[i]:.6f}',
+                    f'{mcc_dict[i]:.6f}',
+                    f'{r2_dict[i]:.6f}',
+                    f'{pc_dict[i]:.6f}',
+                    f'{sd_dict[i]:.6f}',
+                    f'{si_dict[i]:.6f}',
+                    f'{ss_dict[i]:.6f}',
+                ])
+        print(f'[{child.name}] Wrote metrics_summary.csv')
+
+        # ─── Save stacked images for each metric ────────────────────────────────
+        metric_dicts = [
+            ('rho', rho_dict), ('cosine', cos_dict),
+            ('mse', mse_dict), ('rmse', rmse_dict),
+            ('mcc', mcc_dict), ('r2', r2_dict),
+            ('pearson', pc_dict), ('soft_dice', sd_dict),
+            ('soft_iou', si_dict), ('ssim', ss_dict),
         ]
-        w.writerow(header)
-        for i in sorted(td):
-            w.writerow([
-                i,
-                f'{rho_dict[i]:.6f}',
-                f'{cos_dict[i]:.6f}',
-                f'{mse_dict[i]:.6f}',
-                f'{rmse_dict[i]:.6f}',
-                f'{mcc_dict[i]:.6f}',
-                f'{r2_dict[i]:.6f}',
-                f'{pc_dict[i]:.6f}',
-                f'{sd_dict[i]:.6f}',
-                f'{si_dict[i]:.6f}',
-                f'{ss_dict[i]:.6f}',
-            ])
-    print('Wrote metrics_summary.csv')
-
-    # save stacked images with yellow separator under each metric dir
-    for name, md in [
-        ('rho', rho_dict), ('cosine', cos_dict),
-        ('mse', mse_dict), ('rmse', rmse_dict),
-        ('mcc', mcc_dict), ('r2', r2_dict),
-        ('pearson', pc_dict), ('soft_dice', sd_dict),
-        ('soft_iou', si_dict), ('ssim', ss_dict),
-    ]:
-        d = out_dir / name
-        d.mkdir(exist_ok=True)
-        for i, (t, p) in td.items():
-            img = stack_image((t, p))
-            img8 = (
-                np.clip(
+        for name, md in metric_dicts:
+            metric_dir = out_dir / name
+            metric_dir.mkdir(exist_ok=True)
+            for i, (t, p) in td.items():
+                # Stack target & prediction, insert vertical line, save as PNG
+                img = stack_image((t, p))
+                img8 = np.clip(
                     insert_vertical_line((img * 255).astype(np.uint8)),
                     0, 255
                 )
-            )
-            fname = f"{md[i]:.4f}_{i}.png"
-            cv2.imwrite(str(d / fname), img8)
+                fname = f"{md[i]:.4f}_{i}.png"
+                cv2.imwrite(str(metric_dir / fname), img8)
 
-    # Generate and save density plot
-    csv_file = out_dir / 'metrics_summary.csv'
-    metrics = load_metrics(csv_file)
+        # ─── Generate & save density plot ───────────────────────────────────────
+        metrics = load_metrics(summary_csv)
+        overview_path = out_dir / 'overview.png'
+        plot_metrics_density(metrics, overview_path)
+        print(f'[{child.name}] Saved overview density plot to {overview_path}')
 
-    overview_path = out_dir / 'overview.png'
-    plot_metrics_density(metrics, overview_path)
-    print(f"Saved overview density plot to {overview_path}")
+        # ─── Generate & save histograms ────────────────────────────────────────
+        histograms_path = out_dir / 'histogram.png'
+        plot_metrics_histograms(metrics, histograms_path)
+        print(f'[{child.name}] Saved histograms to {histograms_path}')
 
-    # Generate and save histograms
-    histograms_path = out_dir / 'histogram.png'
-    plot_metrics_histograms(metrics, histograms_path)
-    print(f'Saved histograms to {histograms_path}')
-
-    pc_dict = {i: pearson_correlation(t, p) for i, (t, p) in td.items()}
-    print_pearson_bimodal_analysis(
-        [pc for _, pc in sorted(pc_dict.items())]
-    )
+        # ─── Bimodal Pearson analysis & save to bimodal.txt ────────────────────
+        pearson_values = [pc for _, pc in sorted(pc_dict.items())]
+        buffer = io.StringIO()
+        # Assuming print_pearson_bimodal_analysis prints to stdout. We redirect it to our buffer.
+        print_pearson_bimodal_analysis(pearson_values, file=buffer)
+        bimodal_txt = out_dir / 'bimodal.txt'
+        with open(bimodal_txt, 'w') as f:
+            f.write(buffer.getvalue())
+        print(f'[{child.name}] Saved bimodal statistics to {bimodal_txt}')
 
 if __name__ == '__main__':
     main()
