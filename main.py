@@ -10,6 +10,7 @@ from matplotlib import cm
 from scipy.stats import gaussian_kde, skew, kurtosis
 from scipy.signal import find_peaks
 import math
+import io
 
 # ─── DATA I/O ──────────────────────────────────────────────────────────────────
 
