@@ -11,6 +11,7 @@ from scipy.stats import gaussian_kde, skew, kurtosis
 from scipy.signal import find_peaks
 import math
 import io
+import contextlib
 
 # ─── DATA I/O ──────────────────────────────────────────────────────────────────
 
@@ -492,8 +493,9 @@ def main() -> None:
         # ─── Bimodal Pearson analysis & save to bimodal.txt ────────────────────
         pearson_values = [pc for _, pc in sorted(pc_dict.items())]
         buffer = io.StringIO()
-        # Assuming print_pearson_bimodal_analysis prints to stdout. We redirect it to our buffer.
-        print_pearson_bimodal_analysis(pearson_values, file=buffer)
+        # Redirect stdout so that print_pearson_bimodal_analysis writes into buffer
+        with contextlib.redirect_stdout(buffer):
+            print_pearson_bimodal_analysis(pearson_values)
         bimodal_txt = out_dir / 'bimodal.txt'
         with open(bimodal_txt, 'w') as f:
             f.write(buffer.getvalue())
