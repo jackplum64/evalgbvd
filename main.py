@@ -139,6 +139,154 @@ def ssim_index(
     )
     return float(score)
 
+
+# PIXELWISE CONFUSION MATRIX
+def pixelwise_confusion_matrix(
+    pred: NDArray[np.float32],
+    gt: NDArray[np.float32],
+    threshold: float = 0.3
+) -> NDArray[np.int64]:
+    """
+    Compute a 2x2 pixel-wise confusion matrix between a predicted intensity map
+    and a ground-truth intensity map.
+
+    The returned matrix is:
+        [[TP, FP],
+         [FN, TN]]
+    where each entry is the count of pixels in that category.
+
+    Parameters:
+        pred:      Predicted intensity map (float32, arbitrary range, e.g. [0,1]), shape (H, W).  // unitless
+        gt:        Ground truth intensity map (float32, arbitrary range, e.g. [0,1]), shape (H, W).  // unitless
+        threshold: Value in [0,1] at which to binarize both pred and gt.  
+                   Pixels ≥ threshold → 1, else → 0.                       // unitless
+
+    Returns:
+        2x2 confusion matrix (dtype=int64):
+            [[ TP_count,  FP_count ],
+             [ FN_count,  TN_count ]]
+    """
+
+    if pred.shape != gt.shape:
+        raise ValueError(f"Shape mismatch: pred {pred.shape} vs gt {gt.shape}")
+
+    pred_bin = pred >= threshold
+    gt_bin   = gt   >= threshold
+
+    tp = int(np.sum(pred_bin & gt_bin))
+    fp = int(np.sum(pred_bin & (~gt_bin)))
+    fn = int(np.sum((~pred_bin) & gt_bin))
+    tn = int(np.sum((~pred_bin) & (~gt_bin)))
+
+    return np.array([[tp, fp],
+                     [fn, tn]], dtype=np.int64)
+
+
+def pixel_accuracy(conf_mat: NDArray[np.int64]) -> float:
+    """
+    Compute pixel accuracy from a 2x2 confusion matrix.
+
+    Parameters:
+        conf_mat: 2x2 matrix of ints:
+                  [[TP, FP],
+                   [FN, TN]]
+
+    Returns:
+        Pixel accuracy as a float in [0, 1]:
+        (TP + TN) / (TP + FP + FN + TN)
+    """
+    tp, fp = int(conf_mat[0, 0]), int(conf_mat[0, 1])
+    fn, tn = int(conf_mat[1, 0]), int(conf_mat[1, 1])
+
+    total = tp + fp + fn + tn
+    return (tp + tn) / total if total > 0 else 0.0
+
+
+def precision(conf_mat: NDArray[np.int64]) -> float:
+    """
+    Compute precision from a 2x2 confusion matrix.
+
+    Parameters:
+        conf_mat: 2x2 matrix of ints:
+                  [[TP, FP],
+                   [FN, TN]]
+
+    Returns:
+        Precision = TP / (TP + FP), or 0.0 if denominator is zero.
+    """
+    tp, fp = int(conf_mat[0, 0]), int(conf_mat[0, 1])
+
+    denom = tp + fp
+    return tp / denom if denom > 0 else 0.0
+
+
+def recall(conf_mat: NDArray[np.int64]) -> float:
+    """
+    Compute recall (sensitivity) from a 2x2 confusion matrix.
+
+    Parameters:
+        conf_mat: 2x2 matrix of ints:
+                  [[TP, FP],
+                   [FN, TN]]
+
+    Returns:
+        Recall = TP / (TP + FN), or 0.0 if denominator is zero.
+    """
+    tp, fn = int(conf_mat[0, 0]), int(conf_mat[1, 0])
+
+    denom = tp + fn
+    return tp / denom if denom > 0 else 0.0
+
+
+def specificity(conf_mat: NDArray[np.int64]) -> float:
+    """
+    Compute specificity (true negative rate) from a 2x2 confusion matrix.
+
+    Parameters:
+        conf_mat: 2x2 matrix of ints:
+                  [[TP, FP],
+                   [FN, TN]]
+
+    Returns:
+        Specificity = TN / (TN + FP), or 0.0 if denominator is zero.
+    """
+    fp, tn = int(conf_mat[0, 1]), int(conf_mat[1, 1])
+
+    denom = tn + fp
+    return tn / denom if denom > 0 else 0.0
+
+
+def f1_score(conf_mat: NDArray[np.int64]) -> float:
+    """
+    Compute F1 score from a 2x2 confusion matrix.
+
+    Parameters:
+        conf_mat: 2x2 matrix of ints:
+                  [[TP, FP],
+                   [FN, TN]]
+
+    Returns:
+        F1 = 2 * (precision * recall) / (precision + recall),
+        or 0.0 if both precision and recall are zero.
+    """
+    # Reuse above functions for clarity
+    p = precision(conf_mat)
+    r = recall(conf_mat)
+
+    denom = p + r
+    return (2 * p * r) / denom if denom > 0 else 0.0
+
+
+def cosine_similarity(
+    a: NDArray[np.float32], b: NDArray[np.float32]
+) -> float:
+    a_f = a.ravel()
+    b_f = b.ravel()
+    dot = float(a_f @ b_f)
+    na = float(np.linalg.norm(a_f))
+    nb = float(np.linalg.norm(b_f))
+    return dot / (na * nb) if na and nb else 0.0
+
 # ─── IMAGE OPS ─────────────────────────────────────────────────────────────────
 
 def stack_image(
@@ -217,9 +365,6 @@ def strengthen_colormap_in_place(
 # ─── PLOT OPS ─────────────────────────────────────────────────────────────────
 
 def load_metrics(csv_path: Path) -> Dict[str, List[float]]:
-    """
-    Reads 'metrics_summary.csv' and returns a dict mapping metric name → list of values.
-    """
     with open(csv_path, newline='') as f:
         reader = csv.DictReader(f)
         metrics: Dict[str, List[float]] = {
@@ -319,6 +464,46 @@ def plot_metrics_histograms(
     fig.savefig(save_path, dpi=250)
     plt.close(fig)
 
+
+def plot_confusion_matrix(
+    total_cm: NDArray[np.int64],
+    save_path: Path
+) -> None:
+    """
+    Plot the aggregated 2×2 confusion matrix as a heatmap and save it.
+    total_cm is:
+        [[ TP_total, FP_total ],
+         [ FN_total, TN_total ]]
+    """
+    fig, ax = plt.subplots(figsize=(4, 4))
+    im = ax.imshow(total_cm, interpolation='nearest', cmap=cm.Blues)
+    ax.set_title('Aggregated Confusion Matrix', pad=10)
+    ax.set_xlabel('Predicted label')
+    ax.set_ylabel('True label')
+
+    # Set tick labels
+    ax.set_xticks([0, 1])
+    ax.set_yticks([0, 1])
+    ax.set_xticklabels(['1', '0'])
+    ax.set_yticklabels(['1', '0'])
+
+    # Annotate each cell with its count
+    thresh = total_cm.max() / 2.0
+    for i in range(2):
+        for j in range(2):
+            color = "white" if total_cm[i, j] > thresh else "black"
+            ax.text(
+                j, i, f"{total_cm[i, j]}",
+                ha="center", va="center",
+                color=color, fontsize=12
+            )
+
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=250)
+    plt.close(fig)
+
+
 # ─── STATS OPS ─────────────────────────────────────────────────────────────────
 
 def print_pearson_bimodal_analysis(scores: List[float]) -> None:
@@ -380,9 +565,7 @@ def print_pearson_bimodal_analysis(scores: List[float]) -> None:
 def main() -> None:
     script_dir = Path(__file__).parent
 
-    # Parent directory containing all child results folders
-    parent_dir = Path('../../thoopul/ml_notebook_rewrite/ML/results_focal_tversky_gbblur7_final/')
-    # Prefix common to all child directories we want to process
+    parent_dir = Path('/home/jackplum/Documents/projects/evalgbvd/results_focal_tversky_gbblur7')
     child_prefix = 'tversky_focal_float_blur_'
 
     for child in sorted(parent_dir.iterdir()):
@@ -399,7 +582,6 @@ def main() -> None:
         STRENGTH_PRED = 1.4
         STRENGTH_GT = 1.0
 
-        # Create a separate output folder for this child directory
         out_dir = script_dir / 'output' / child.name
         out_dir.mkdir(exist_ok=True, parents=True)
 
@@ -410,13 +592,10 @@ def main() -> None:
         td = organize_data(raw)
         print(f'[{child.name}] Found {len(td)} (target,pred) pairs')
 
-        # Apply optional colormap strengthening
         if STRENGTH_PRED != 1.0:
             strengthen_colormap_in_place(td, 'pred', STRENGTH_PRED)
         if STRENGTH_GT != 1.0:
             strengthen_colormap_in_place(td, 'gt', STRENGTH_GT)
-
-        # Optional normalization
         if NORMALIZE:
             normalize_in_place(td)
 
@@ -433,13 +612,32 @@ def main() -> None:
         si_dict = {i: soft_iou(t, p) for i, (t, p) in td.items()}
         ss_dict = {i: ssim_index(t, p) for i, (t, p) in td.items()}
 
+        # Compute per-image confusion matrices and derived stats
+        conf_mats: List[NDArray[np.int64]] = []
+        pa_dict: Dict[int, float] = {}
+        prec_dict: Dict[int, float] = {}
+        rec_dict: Dict[int, float] = {}
+        spec_dict: Dict[int, float] = {}
+        f1_dict: Dict[int, float] = {}
+
+        for i, (t, p) in td.items():
+            cm = pixelwise_confusion_matrix(t, p, threshold=0.1)
+            conf_mats.append(cm)
+            pa_dict[i] = pixel_accuracy(cm)
+            prec_dict[i] = precision(cm)
+            rec_dict[i] = recall(cm)
+            spec_dict[i] = specificity(cm)
+            f1_dict[i] = f1_score(cm)
+
         # ─── Save summary CSV ───────────────────────────────────────────────────
         summary_csv = out_dir / 'metrics_summary.csv'
         with open(summary_csv, 'w', newline='') as f:
             w = csv.writer(f)
             header = [
-                'idx', 'rho', 'cosine', 'mse', 'rmse', 'mcc',
-                'r2', 'pearson', 'soft_dice', 'soft_iou', 'ssim'
+                'idx',
+                'rho', 'cosine', 'mse', 'rmse', 'mcc',
+                'r2', 'pearson', 'soft_dice', 'soft_iou', 'ssim',
+                'pixel_accuracy', 'precision', 'recall', 'specificity', 'f1'
             ]
             w.writerow(header)
             for i in sorted(td):
@@ -455,22 +653,29 @@ def main() -> None:
                     f'{sd_dict[i]:.6f}',
                     f'{si_dict[i]:.6f}',
                     f'{ss_dict[i]:.6f}',
+                    f'{pa_dict[i]:.6f}',
+                    f'{prec_dict[i]:.6f}',
+                    f'{rec_dict[i]:.6f}',
+                    f'{spec_dict[i]:.6f}',
+                    f'{f1_dict[i]:.6f}',
                 ])
         print(f'[{child.name}] Wrote metrics_summary.csv')
 
         # ─── Save stacked images for each metric ────────────────────────────────
-        metric_dicts = [
+        metric_dicts: List[Tuple[str, Dict[int, float]]] = [
             ('rho', rho_dict), ('cosine', cos_dict),
             ('mse', mse_dict), ('rmse', rmse_dict),
             ('mcc', mcc_dict), ('r2', r2_dict),
             ('pearson', pc_dict), ('soft_dice', sd_dict),
             ('soft_iou', si_dict), ('ssim', ss_dict),
+            ('pixel_accuracy', pa_dict), ('precision', prec_dict),
+            ('recall', rec_dict), ('specificity', spec_dict),
+            ('f1', f1_dict)
         ]
         for name, md in metric_dicts:
             metric_dir = out_dir / name
             metric_dir.mkdir(exist_ok=True)
             for i, (t, p) in td.items():
-                # Stack target & prediction, insert vertical line, save as PNG
                 img = stack_image((t, p))
                 img8 = np.clip(
                     insert_vertical_line((img * 255).astype(np.uint8)),
@@ -490,10 +695,17 @@ def main() -> None:
         plot_metrics_histograms(metrics, histograms_path)
         print(f'[{child.name}] Saved histograms to {histograms_path}')
 
+        # ─── Aggregate confusion matrices and plot ─────────────────────────────
+        # Sum element-wise across all per-image 2×2 matrices
+        stacked = np.stack(conf_mats, axis=0)  # shape = (N_images, 2, 2)
+        total_cm = np.sum(stacked, axis=0)     # shape = (2, 2)
+        cm_path = out_dir / 'confusion_matrix.png'
+        plot_confusion_matrix(total_cm, cm_path)
+        print(f'[{child.name}] Saved aggregated confusion matrix to {cm_path}')
+
         # ─── Bimodal Pearson analysis & save to bimodal.txt ────────────────────
         pearson_values = [pc for _, pc in sorted(pc_dict.items())]
         buffer = io.StringIO()
-        # Redirect stdout so that print_pearson_bimodal_analysis writes into buffer
         with contextlib.redirect_stdout(buffer):
             print_pearson_bimodal_analysis(pearson_values)
         bimodal_txt = out_dir / 'bimodal.txt'
