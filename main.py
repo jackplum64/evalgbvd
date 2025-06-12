@@ -6,7 +6,7 @@ import cv2
 import csv
 from skimage.metrics import structural_similarity
 import matplotlib.pyplot as plt
-from matplotlib import cm
+from matplotlib import cm as colormap
 from scipy.stats import gaussian_kde, skew, kurtosis
 from scipy.signal import find_peaks
 import math
@@ -40,6 +40,14 @@ def sum_pixelwise_product(
     data: Dict[int, Tuple[NDArray[np.float32], NDArray[np.float32]]]
 ) -> Dict[int, float]:
     return {i: float(np.sum(t * p)) for i, (t, p) in data.items()}
+
+def sum_pixelwise(
+    data: Dict[int, Tuple[NDArray[np.float32], NDArray[np.float32]]]
+) -> Dict[int, float]:
+    """
+    Returns sum of all target pixels
+    """
+    return {i: float(np.sum(t)) for i, (t, p) in data.items()}
 
 def cosine_similarity(
     a: NDArray[np.float32], b: NDArray[np.float32]
@@ -362,6 +370,26 @@ def strengthen_colormap_in_place(
         new_pred = strengthen_colormap(pred_img, strength) if mode in ('pred', 'both') else pred_img
         images[key] = (new_gt, new_pred)
 
+def kill_zeros_in_place(
+    data: Dict[int, Tuple[NDArray[np.float32], NDArray[np.float32]]],
+    thresh: float
+) -> None:
+    """
+    Remove entries whose target pixelwise sum is below the given threshold.
+
+    Parameters:
+        data:   Dict mapping an integer ID to a (target, pred) tuple of image arrays (unit: intensity).
+        thresh: Minimum allowed sum of target pixels (unit: intensity); entries with sum < thresh are removed.
+    """
+    to_remove: List[int] = []
+    for idx, (t, _) in data.items():
+        total_intensity: float = float(np.sum(t))  # unit: intensity
+        if total_intensity < thresh:
+            to_remove.append(idx)
+
+    for idx in to_remove:
+        data.pop(idx, None)
+
 # ─── PLOT OPS ─────────────────────────────────────────────────────────────────
 
 def load_metrics(csv_path: Path) -> Dict[str, List[float]]:
@@ -398,7 +426,7 @@ def plot_metrics_density(
         dens = kde(vals)
         ax.scatter(
             np.zeros_like(vals), vals,
-            c=dens, s=12, cmap=cm.jet, rasterized=True, zorder=10
+            c=dens, s=12, cmap=colormap.jet, rasterized=True, zorder=10
         )
         ax.axvline(0.0, color='black', linewidth=1, zorder=5)
         ax.set_title(name, pad=6)
@@ -470,13 +498,13 @@ def plot_confusion_matrix(
     save_path: Path
 ) -> None:
     """
-    Plot the aggregated 2×2 confusion matrix as a heatmap and save it.
+    Plot the aggregated 2x2 confusion matrix as a heatmap and save it.
     total_cm is:
         [[ TP_total, FP_total ],
          [ FN_total, TN_total ]]
     """
     fig, ax = plt.subplots(figsize=(4, 4))
-    im = ax.imshow(total_cm, interpolation='nearest', cmap=cm.Blues)
+    im = ax.imshow(total_cm, interpolation='nearest', cmap=colormap.Blues)
     ax.set_title('Aggregated Confusion Matrix', pad=10)
     ax.set_xlabel('Predicted label')
     ax.set_ylabel('True label')
@@ -565,7 +593,7 @@ def print_pearson_bimodal_analysis(scores: List[float]) -> None:
 def main() -> None:
     script_dir = Path(__file__).parent
 
-    parent_dir = Path('/home/jackplum/Documents/projects/evalgbvd/results_focal_tversky_gbblur7')
+    parent_dir = Path('/home/jackplum/Documents/projects/evalgbvd/results_focal_tversky_gbblur7_final_2')
     child_prefix = 'tversky_focal_float_blur_'
 
     for child in sorted(parent_dir.iterdir()):
@@ -581,6 +609,7 @@ def main() -> None:
         NORMALIZE = False
         STRENGTH_PRED = 1.4
         STRENGTH_GT = 1.0
+        KILL_ZEROS_THRESH = 4 # Threshold of minimum pixelwise sum below which data will be ignored
 
         out_dir = script_dir / 'output' / child.name
         out_dir.mkdir(exist_ok=True, parents=True)
@@ -598,6 +627,8 @@ def main() -> None:
             strengthen_colormap_in_place(td, 'gt', STRENGTH_GT)
         if NORMALIZE:
             normalize_in_place(td)
+        if KILL_ZEROS_THRESH is not None:
+            kill_zeros_in_place(td, KILL_ZEROS_THRESH)
 
         # ─── Compute metrics ────────────────────────────────────────────────────
         rho_dict = sum_pixelwise_product(td)
@@ -696,7 +727,7 @@ def main() -> None:
         print(f'[{child.name}] Saved histograms to {histograms_path}')
 
         # ─── Aggregate confusion matrices and plot ─────────────────────────────
-        # Sum element-wise across all per-image 2×2 matrices
+        # Sum element-wise across all per-image 2x2 matrices
         stacked = np.stack(conf_mats, axis=0)  # shape = (N_images, 2, 2)
         total_cm = np.sum(stacked, axis=0)     # shape = (2, 2)
         cm_path = out_dir / 'confusion_matrix.png'
@@ -712,6 +743,97 @@ def main() -> None:
         with open(bimodal_txt, 'w') as f:
             f.write(buffer.getvalue())
         print(f'[{child.name}] Saved bimodal statistics to {bimodal_txt}')
+
+        # ─── NEW: Pearson vs. pixelwise-sum density plot with best-fit lines ──
+        sum_dict: Dict[int, float] = sum_pixelwise(td)
+        idxs = sorted(td.keys())
+
+        if len(idxs) >= 2:
+            # Prepare arrays of Pearson (x) and pixel-sum (y)
+            x_vals: np.ndarray = np.array([pc_dict[i] for i in idxs], dtype=float)
+            y_vals: np.ndarray = np.array([sum_dict[i] for i in idxs], dtype=float)
+
+            # Attempt a 2D KDE in (x, y)
+            try:
+                points = np.vstack((x_vals, y_vals))       # shape = (2, N)
+                kde = gaussian_kde(points)                  # may raise if N < 2 or singular
+                dens = kde(points)
+            except Exception:
+                # Fall back to uniform density if KDE fails
+                dens = np.ones_like(x_vals, dtype=float)
+
+            plt.figure(figsize=(6, 6))
+            plt.scatter(
+                x_vals, y_vals,
+                c=dens,            # color by estimated density or constant
+                s=16,              # marker size
+                cmap=colormap.jet,
+                rasterized=True,
+                edgecolors='none'
+            )
+
+            # Linear fit: y = m*x + b
+            lin_coeffs: np.ndarray = np.polyfit(x_vals, y_vals, 1)
+            m, b = float(lin_coeffs[0]), float(lin_coeffs[1])
+
+            # Quadratic fit: y = a*x^2 + b*x + c
+            quad_coeffs: np.ndarray = np.polyfit(x_vals, y_vals, 2)
+            a_q, b_q, c_q = map(float, quad_coeffs)
+
+            x_min, x_max = float(np.min(x_vals)), float(np.max(x_vals))
+            x_fit: np.ndarray = np.linspace(x_min, x_max, 200)
+
+            y_lin_fit: np.ndarray = m * x_fit + b
+            y_quad_fit: np.ndarray = a_q * x_fit**2 + b_q * x_fit + c_q
+
+            plt.plot(
+                x_fit, y_lin_fit,
+                color='black', linewidth=2, label='Linear fit'
+            )
+            plt.plot(
+                x_fit, y_quad_fit,
+                color='black', linewidth=2, linestyle='--', label='Quadratic fit'
+            )
+            plt.legend()
+
+            plt.xlabel('Pearson Correlation', fontsize=12)     # unitless
+            plt.ylabel('Pixelwise Sum (target)', fontsize=12)   # intensity units summed
+            plt.title('Pearson vs. Target Pixelwise Sum (Density with Fits)', fontsize=14)
+            plt.grid(linestyle=':', linewidth=0.5)
+
+            newfig_path = out_dir / 'newfig.png'
+            plt.tight_layout()
+            plt.savefig(newfig_path, dpi=250)
+            plt.close()
+            print(f'[{child.name}] Saved Pearson vs. pixelwise-sum density + fits to {newfig_path}')
+
+        elif len(idxs) == 1:
+            # Only a single (x, y) pair exists: plot it in a blank figure (no KDE, no fit)
+            i0 = idxs[0]
+            x0 = float(pc_dict[i0])
+            y0 = float(sum_dict[i0])
+
+            plt.figure(figsize=(6, 6))
+            plt.scatter(
+                [x0], [y0],
+                c='gray',  # single‐point color
+                s=50,
+                edgecolors='black'
+            )
+            plt.xlabel('Pearson Correlation', fontsize=12)
+            plt.ylabel('Pixelwise Sum (target)', fontsize=12)
+            plt.title('Pearson vs. Target Pixelwise Sum (Single Sample)', fontsize=14)
+            plt.grid(linestyle=':', linewidth=0.5)
+
+            newfig_path = out_dir / 'newfig.png'
+            plt.tight_layout()
+            plt.savefig(newfig_path, dpi=250)
+            plt.close()
+            print(f'[{child.name}] Only one sample—saved single‐point plot to {newfig_path}')
+
+        else:
+            # No data at all: skip this plot
+            print(f'[{child.name}] No data for Pearson vs. pixelwise-sum plot (skipping).')
 
 if __name__ == '__main__':
     main()
