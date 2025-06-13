@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Literal
 import numpy as np
 from numpy.typing import NDArray
 import cv2
@@ -48,6 +48,27 @@ def sum_pixelwise(
     Returns sum of all target pixels
     """
     return {i: float(np.sum(t)) for i, (t, p) in data.items()}
+
+def sum_gt(
+    data: Dict[int, Tuple[NDArray[np.float32], NDArray[np.float32]]]
+) -> Dict[int, float]:
+    """
+    Returns sum of ground-truth (target) pixels for each image.
+    Parameters:
+        data: Dict mapping ID → (gt, pred) image arrays (unit: intensity).
+    """
+    return {i: float(np.sum(gt)) for i, (gt, _) in data.items()}
+
+
+def sum_pred(
+    data: Dict[int, Tuple[NDArray[np.float32], NDArray[np.float32]]]
+) -> Dict[int, float]:
+    """
+    Returns sum of prediction pixels for each image.
+    Parameters:
+        data: Dict mapping ID → (gt, pred) image arrays (unit: intensity).
+    """
+    return {i: float(np.sum(pred)) for i, (_, pred) in data.items()}
 
 def cosine_similarity(
     a: NDArray[np.float32], b: NDArray[np.float32]
@@ -372,19 +393,73 @@ def strengthen_colormap_in_place(
 
 def kill_zeros_in_place(
     data: Dict[int, Tuple[NDArray[np.float32], NDArray[np.float32]]],
-    thresh: float
+    thresh: float,
+    mode: Literal['gt', 'pred', 'sum'] = 'gt'
 ) -> None:
     """
-    Remove entries whose target pixelwise sum is below the given threshold.
-
+    Remove entries whose selected pixelwise sum is below `thresh`.
     Parameters:
-        data:   Dict mapping an integer ID to a (target, pred) tuple of image arrays (unit: intensity).
-        thresh: Minimum allowed sum of target pixels (unit: intensity); entries with sum < thresh are removed.
+        data:   Dict mapping ID → (gt, pred) image arrays (unit: intensity).
+        thresh: Minimum allowed sum (unit: intensity).
+        mode:   Which sum to use – 'gt' (ground truth), 'pred' (prediction),
+                or 'sum' (gt + pred).
     """
     to_remove: List[int] = []
-    for idx, (t, _) in data.items():
-        total_intensity: float = float(np.sum(t))  # unit: intensity
-        if total_intensity < thresh:
+    for idx, (gt, pred) in data.items():
+        if mode == 'gt':
+            total: float = float(np.sum(gt))       # unit: intensity
+        elif mode == 'pred':
+            total: float = float(np.sum(pred))     # unit: intensity
+        else:  # mode == 'sum'
+            total = float(np.sum(gt) + np.sum(pred))  # unit: intensity
+
+        if total < thresh:
+            to_remove.append(idx)
+
+    for idx in to_remove:
+        data.pop(idx, None)
+
+
+def save_and_kill_zeros_in_place(
+    data: Dict[int, Tuple[NDArray[np.float32], NDArray[np.float32]]],
+    thresh: float,
+    zeros_dir: Path,
+    mode: Literal['gt', 'pred', 'sum'] = 'gt'
+) -> None:
+    """
+    Save and remove entries whose selected pixelwise sum < thresh.
+    Parameters:
+        data:      Dict mapping ID → (gt, pred) image arrays (unit: intensity).
+        thresh:    Minimum allowed sum (unit: intensity).
+        zeros_dir: Directory in which to save the low-sum images.
+        mode:      Which sum to use – 'gt', 'pred', or 'sum'.
+    """
+    zeros_dir.mkdir(parents=True, exist_ok=True)
+    to_remove: List[int] = []
+
+    for idx, (gt, pred) in data.items():
+        if mode == 'gt':
+            total = float(np.sum(gt))
+        elif mode == 'pred':
+            total = float(np.sum(pred))
+        else:
+            total = float(np.sum(gt) + np.sum(pred))
+
+        if total < thresh:
+            # stack side-by-side and insert a white separator
+            stacked = np.concatenate((gt, pred), axis=1)
+            img8 = (stacked * 255).astype(np.uint8)
+            h, w = img8.shape[:2]
+            mid = w // 2
+            if img8.ndim == 2:
+                img8 = np.insert(img8, mid, 255, axis=1)
+            else:
+                c = img8.shape[2]
+                line = np.ones((h, 1, c), dtype=np.uint8) * 255
+                img8 = np.insert(img8, mid, line, axis=1)
+
+            fname = f"{mode}_{total:.4f}_{idx}.png"
+            cv2.imwrite(str(zeros_dir / fname), img8)
             to_remove.append(idx)
 
     for idx in to_remove:
@@ -609,7 +684,7 @@ def main() -> None:
         NORMALIZE = False
         STRENGTH_PRED = 1.4
         STRENGTH_GT = 1.0
-        KILL_ZEROS_THRESH = 4 # Threshold of minimum pixelwise sum below which data will be ignored
+        KILL_ZEROS_THRESH = 3 # Threshold of minimum pixelwise sum below which data will be ignored
 
         out_dir = script_dir / 'output' / child.name
         out_dir.mkdir(exist_ok=True, parents=True)
@@ -628,7 +703,9 @@ def main() -> None:
         if NORMALIZE:
             normalize_in_place(td)
         if KILL_ZEROS_THRESH is not None:
-            kill_zeros_in_place(td, KILL_ZEROS_THRESH)
+            #kill_zeros_in_place(td, KILL_ZEROS_THRESH, mode='pred')
+            zeros_dir = out_dir / 'zeros'
+            save_and_kill_zeros_in_place(td, KILL_ZEROS_THRESH, zeros_dir, mode='gt')
 
         # ─── Compute metrics ────────────────────────────────────────────────────
         rho_dict = sum_pixelwise_product(td)
@@ -744,7 +821,7 @@ def main() -> None:
             f.write(buffer.getvalue())
         print(f'[{child.name}] Saved bimodal statistics to {bimodal_txt}')
 
-        # ─── NEW: Pearson vs. pixelwise-sum density plot with best-fit lines ──
+        # ─── Pearson vs. pixelwise-sum density plot with best-fit lines ──
         sum_dict: Dict[int, float] = sum_pixelwise(td)
         idxs = sorted(td.keys())
 
