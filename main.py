@@ -305,17 +305,6 @@ def f1_score(conf_mat: NDArray[np.int64]) -> float:
     denom = p + r
     return (2 * p * r) / denom if denom > 0 else 0.0
 
-
-def cosine_similarity(
-    a: NDArray[np.float32], b: NDArray[np.float32]
-) -> float:
-    a_f = a.ravel()
-    b_f = b.ravel()
-    dot = float(a_f @ b_f)
-    na = float(np.linalg.norm(a_f))
-    nb = float(np.linalg.norm(b_f))
-    return dot / (na * nb) if na and nb else 0.0
-
 # ─── IMAGE OPS ─────────────────────────────────────────────────────────────────
 
 def stack_image(
@@ -569,37 +558,46 @@ def plot_metrics_histograms(
 
 
 def plot_confusion_matrix(
-    total_cm: NDArray[np.int64],
+    confusion_matrix: np.ndarray,
     save_path: Path
 ) -> None:
     """
-    Plot the aggregated 2x2 confusion matrix as a heatmap and save it.
-    total_cm is:
-        [[ TP_total, FP_total ],
-         [ FN_total, TN_total ]]
+    Plot a 2x2 confusion matrix in scikit-learn format,
+    after swapping the TN (top-left) and TP (bottom-right) entries.
+
+    Args:
+        confusion_matrix: 2x2 array [[TN, FP],
+                                     [FN, TP]]
+        save_path:         Path to save the resulting figure
     """
+    # copy and swap TN and TP
+    cm = confusion_matrix.copy()
+    cm[0, 0], cm[1, 1] = cm[1, 1], cm[0, 0]
+
     fig, ax = plt.subplots(figsize=(4, 4))
-    im = ax.imshow(total_cm, interpolation='nearest', cmap=colormap.Blues)
-    ax.set_title('Aggregated Confusion Matrix', pad=10)
-    ax.set_xlabel('Predicted label')
-    ax.set_ylabel('True label')
+    im = ax.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
 
-    # Set tick labels
+    ax.set_title("Pixelwise Confusion Matrix", pad=10)
+    ax.set_xlabel("Predicted label")
+    ax.set_ylabel("True label")
+
+    # natural-order tick labels
+    labels = ["0", "1"]
     ax.set_xticks([0, 1])
+    ax.set_xticklabels(labels)
     ax.set_yticks([0, 1])
-    ax.set_xticklabels(['1', '0'])
-    ax.set_yticklabels(['1', '0'])
+    ax.set_yticklabels(labels)
 
-    # Annotate each cell with its count
-    thresh = total_cm.max() / 2.0
-    for i in range(2):
-        for j in range(2):
-            color = "white" if total_cm[i, j] > thresh else "black"
-            ax.text(
-                j, i, f"{total_cm[i, j]}",
-                ha="center", va="center",
-                color=color, fontsize=12
-            )
+    # annotate each cell
+    thresh = cm.max() / 2.0
+    for i, j in np.ndindex(cm.shape):
+        count = int(cm[i, j])
+        color = "white" if cm[i, j] > thresh else "black"
+        ax.text(
+            j, i, f"{count}",
+            ha="center", va="center",
+            color=color, fontsize=12
+        )
 
     fig.colorbar(im, ax=ax)
     fig.tight_layout()
@@ -668,7 +666,7 @@ def print_pearson_bimodal_analysis(scores: List[float]) -> None:
 def main() -> None:
     script_dir = Path(__file__).parent
 
-    parent_dir = Path('/home/jackplum/Documents/projects/evalgbvd/results_focal_tversky_gbblur7_final_2')
+    parent_dir = Path('/home/jackplum/Documents/projects/evalgbvd/results_focal_tversky_gbblur7_final')
     child_prefix = 'tversky_focal_float_blur_'
 
     for child in sorted(parent_dir.iterdir()):
